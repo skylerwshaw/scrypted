@@ -57,6 +57,7 @@
     "preserve": "npm run build",
     "serve": "node --expose-gc dist/scrypted-main.js",
     "serve-no-build": "node --expose-gc dist/scrypted-main.js",
+    "test": "npm run build && node test/rpc-iterator-leak-test.js",
     "prebuild": "rimraf dist",
     "build": "tsc --build tsconfig.json",
     "postbuild": "node test/check-build-output.js",

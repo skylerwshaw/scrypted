@@ -1,84 +1,137 @@
-name: Publish Scrypted Docker Image
+name: Release fork Docker image
 
 on:
+  push:
+    tags: ["v*-fork.*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "The npm tag used to build the Docker image. The tag will be resolved as a specific version on npm, and that will be used to version the docker image."
+      version:
+        description: "Image version (for example v0.144.2-fork.1)"
         required: true
-      publish_tag:
-        description: "The versioned tag for the published Docker image. NPM will use the minor version, Docker should only specify a patch version."
-        required: false
-  release:
-    types: [published]
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-docker-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/scrypted
 
 jobs:
-  build:
-    name: Push Docker image to GHCR
+  test-and-package:
+    name: Test and package server source
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        BASE: [
-          ["noble-nvidia", ".s6", "noble-nvidia", "nvidia"],
-          ["noble-nvidia-legacy", ".s6", "noble-nvidia-legacy", "nvidia-legacy"],
-          ["noble-intel", ".s6", "noble-intel", "intel"],
-          ["noble-amd", ".s6", "noble-amd", "amd"],
-          ["noble-full", ".s6", "noble-full", "full"],
-          ["noble-lite", "", "noble-lite", "lite"],
-          ["noble-lite", ".router", "noble-router", "router"],
-        ]
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
-      - name: Check out the repo
-        uses: actions/checkout@v3
-
-      - name: NPM Package Request
-        id: npm-request
-        uses: fjogeleit/http-request-action@v1
+      - name: Check out source
+        uses: actions/checkout@v6
         with:
-          url: 'https://registry.npmjs.org/@scrypted/server'
-          method: 'GET'
+          fetch-depth: 0
 
-      - name: Set NPM Version
-        id: package-version
-        run: echo "NPM_VERSION=${{ fromJson(steps.npm-request.outputs.response)['dist-tags'][ github.event.inputs.tag] }}" >> "$GITHUB_OUTPUT"
+      - name: Validate release source and version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "Release commit must be on origin/main." >&2
+            exit 1
+          }
+          server_version=$(jq -r .version server/package.json)
+          expected_prefix="v${server_version}-fork."
+          case "$REQUESTED_VERSION" in
+            "$expected_prefix"[0-9]*) ;;
+            *)
+              echo "Version must match ${expected_prefix}<number>." >&2
+              exit 1
+              ;;
+          esac
+          suffix=${REQUESTED_VERSION#"$expected_prefix"}
+          case "$suffix" in
+            *[!0-9]*|'')
+              echo "Fork release suffix must be a positive integer." >&2
+              exit 1
+              ;;
+          esac
+          test "$suffix" -gt 0
+          echo "value=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+
+      - name: Pack tested server
+        working-directory: server
+        run: |
+          mkdir -p ../install/docker/dist
+          npm pack --pack-destination ../install/docker/dist
+          mv ../install/docker/dist/scrypted-server-*.tgz ../install/docker/dist/scrypted-server.tgz
+
+      - name: Upload tested server package
+        uses: actions/upload-artifact@v6
+        with:
+          name: scrypted-server-${{ steps.version.outputs.value }}
+          path: install/docker/dist/scrypted-server.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.test-and-package.outputs.version }}
+    needs: test-and-package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download tested server package
+        uses: actions/download-artifact@v6
+        with:
+          name: scrypted-server-${{ needs.test-and-package.outputs.version }}
+          path: install/docker/dist
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v4
 
-      - name: Login to Github Container Registry
-        uses: docker/login-action@v2
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+      - name: Build and publish source-based image
+        uses: docker/build-push-action@v7
         with:
-          build-args: |
-            BASE=${{ matrix.BASE[0] }}
-            SCRYPTED_INSTALL_VERSION=${{ steps.package-version.outputs.NPM_VERSION }}
-          context: install/docker/
-          file: install/docker/Dockerfile${{ matrix.BASE[1] }}
+          context: .
+          file: Dockerfile.fork
           platforms: linux/amd64,linux/arm64
           push: true
-          # when publishing a tag (beta or latest), platform and version, create some tags as follows.
-          # using beta 0.0.1 as an example
-          # ghcr.io/<owner>/scrypted:v0.0.1-noble-full
-          # ghcr.io/<owner>/scrypted:beta
-          # ghcr.io/<owner>/scrypted:beta-nvidia|intel|full|router|lite
-
-          # using latest 0.0.2 as an example:
-          # ghcr.io/<owner>/scrypted:v0.0.2-noble-full
-          # ghcr.io/<owner>/scrypted:latest
-          # ghcr.io/<owner>/scrypted:nvidia|intel|full|router|lite
           tags: |
-            ${{ format('ghcr.io/{2}/scrypted:v{1}-{0}', matrix.BASE[0], github.event.inputs.publish_tag || steps.package-version.outputs.NPM_VERSION, github.repository_owner) }}
-            ${{ matrix.BASE[2] == 'noble-full' && format('ghcr.io/{1}/scrypted:{0}', github.event.inputs.tag, github.repository_owner) || '' }}
-            ${{ github.event.inputs.tag == 'latest' && format('ghcr.io/{1}/scrypted:{0}', matrix.BASE[3], github.repository_owner) || ''}}
-            ${{ github.event.inputs.tag != 'latest' && format('ghcr.io/{2}/scrypted:{0}-{1}', github.event.inputs.tag, matrix.BASE[3], github.repository_owner) || '' }}
+            ${{ env.IMAGE }}:${{ needs.test-and-package.outputs.version }}
+            ${{ env.IMAGE }}:main
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.test-and-package.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
