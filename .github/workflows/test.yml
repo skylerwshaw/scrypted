@@ -3,34 +3,12 @@ name: Test
 on:
   push:
     branches: ["main"]
-    paths: ["install/**", "server/**", ".github/workflows/test.yml"]
+    paths: ["install/**", ".github/workflows/test.yml"]
   pull_request:
-    paths: ["install/**", "server/**", ".github/workflows/test.yml"]
+    paths: ["install/**", ".github/workflows/test.yml"]
   workflow_dispatch:
   
 jobs:
-  test_server:
-    name: Test server source
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-
-      - name: Install locked dependencies
-        working-directory: server
-        run: npm ci
-
-      - name: Run server tests
-        working-directory: server
-        run: npm test
-
   test_local:
     name: Test local installation on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
