@@ -86,7 +86,7 @@ jobs:
           mv ../install/docker/dist/scrypted-server-*.tgz ../install/docker/dist/scrypted-server.tgz
 
       - name: Upload tested server package
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: scrypted-server-${{ steps.version.outputs.value }}
           path: install/docker/dist/scrypted-server.tgz
@@ -101,7 +101,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download tested server package
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: scrypted-server-${{ needs.test-and-package.outputs.version }}
           path: install/docker/dist
